@@ -1,0 +1,7 @@
+secret.key
+life_log_encrypted.db
+*.log
+nohup.out
+watcher.log
+__pycache__/
+*.pyc
