@@ -1,0 +1,5 @@
+life_log.txt
+life_log_encrypted.db
+secret.key
+*.db
+*.log
