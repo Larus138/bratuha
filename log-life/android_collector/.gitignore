@@ -5,3 +5,5 @@ nohup.out
 watcher.log
 __pycache__/
 *.pyc
+bratukha_session.session
+tg_auth.py
