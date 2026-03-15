@@ -1,1 +1,0 @@
-0 0 * * * cd ~/bratuha/log-life/android_collector && python tg_collector.py >> tg_collector.log 2>&1

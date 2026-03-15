@@ -1,4 +1,4 @@
-import sqlite3, datetime, os
+import sqlite3, datetime, os, json
 from cryptography.fernet import Fernet
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -29,6 +29,18 @@ def get_all(event_type):
             pass
     return result
 
+def get_last(event_type):
+    row = conn.execute(
+        "SELECT value FROM events WHERE event_type=? ORDER BY timestamp DESC LIMIT 1",
+        (event_type,)
+    ).fetchone()
+    if row:
+        try:
+            return json.loads(decrypt(row[0]))
+        except:
+            return decrypt(row[0])
+    return None
+
 def get_by_day(event_type):
     data = get_all(event_type)
     by_day = {}
@@ -39,11 +51,19 @@ def get_by_day(event_type):
         by_day[day].append((t, v))
     return by_day
 
+def get_last_n(event_type, n=1440):
+    rows = conn.execute(
+        "SELECT timestamp, value FROM events WHERE event_type=? ORDER BY timestamp DESC LIMIT ?",
+        (event_type, n)
+    ).fetchall()
+    return [(r[0], decrypt(r[1])) for r in rows]
+
 print("================================================")
-print("   DIGITAL TWIN — АНАЛИЗ ПАТТЕРНОВ v2")
+print("   DIGITAL TWIN — АНАЛИЗ ПАТТЕРНОВ v3")
 print(f"   {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
 print("================================================")
 
+# ── 1. РЕЖИМ СНА ─────────────────────────────────────
 print("\n[ 1 ] РЕЖИМ СНА И АКТИВНОСТИ")
 battery_data = get_all("battery")
 hour_counts = {}
@@ -53,17 +73,18 @@ for t, v in battery_data:
 
 if hour_counts:
     avg = sum(hour_counts.values()) / len(hour_counts)
-    sleep_hours = sorted([h for h, cnt in hour_counts.items() if cnt < avg * 0.4])
-    active_hours = sorted([h for h, cnt in hour_counts.items() if cnt >= avg * 0.7])
+    sleep_hours  = sorted([h for h, c in hour_counts.items() if c < avg * 0.3])
+    active_hours = sorted([h for h, c in hour_counts.items() if c >= avg * 0.7])
+    peak_hour    = max(hour_counts, key=hour_counts.get)
+    min_hour     = min(hour_counts, key=hour_counts.get)
     if sleep_hours:
-        print(f"  😴 Вероятный сон    : {sleep_hours[0]}:00 — {sleep_hours[-1]+1}:00")
+        print(f"  😴 Вероятный сон    : {sleep_hours[0]:02d}:00 — {sleep_hours[-1]+1:02d}:00")
     if active_hours:
-        print(f"  📱 Активен          : {active_hours[0]}:00 — {active_hours[-1]+1}:00")
-    most_active = max(hour_counts.items(), key=lambda x: x[1])
-    least_active = min(hour_counts.items(), key=lambda x: x[1])
-    print(f"  🔥 Пик активности   : {most_active[0]}:00 ({most_active[1]} записей)")
-    print(f"  💤 Минимум          : {least_active[0]}:00 ({least_active[1]} записей)")
+        print(f"  📱 Активен          : {active_hours[0]:02d}:00 — {active_hours[-1]+1:02d}:00")
+    print(f"  🔥 Пик активности   : {peak_hour:02d}:00 ({hour_counts[peak_hour]} записей)")
+    print(f"  💤 Минимум          : {min_hour:02d}:00 ({hour_counts[min_hour]} записей)")
 
+# ── 2. ПРОДУКТИВНЫЕ ЧАСЫ ─────────────────────────────
 print("\n[ 2 ] ПРОДУКТИВНЫЕ ЧАСЫ (по CPU)")
 cpu_data = get_all("cpu_load")
 hour_load = {}
@@ -72,43 +93,43 @@ for t, v in cpu_data:
     try:
         load = float(v.split('load:')[1].split(',')[0].strip())
         h = t.hour
-        hour_load[h] = hour_load.get(h, 0) + load
+        hour_load[h]  = hour_load.get(h, 0) + load
         hour_count[h] = hour_count.get(h, 0) + 1
     except:
         pass
 
 if hour_load:
-    hour_avg = {h: hour_load[h]/hour_count[h] for h in hour_load}
+    hour_avg     = {h: hour_load[h]/hour_count[h] for h in hour_load}
     sorted_hours = sorted(hour_avg.items(), key=lambda x: x[1], reverse=True)
     print(f"  🔥 Топ активных часов:")
     for h, load in sorted_hours[:5]:
-        bar = "█" * min(int(load/2), 25)
+        bar = "█" * min(int(load/2), 20)
         print(f"    {h:02d}:00  {bar} {load:.1f}")
     print(f"  💤 Тихие часы:")
     for h, load in sorted_hours[-3:]:
-        bar = "░" * min(int(load/2), 25)
+        bar = "░" * min(int(load/2), 20)
         print(f"    {h:02d}:00  {bar} {load:.1f}")
 
+# ── 3. ТРЕНДЫ ПО ДНЯМ ────────────────────────────────
 print("\n[ 3 ] ТРЕНДЫ ПО ДНЯМ")
 battery_by_day = get_by_day("battery")
-cpu_by_day = get_by_day("cpu_load")
-ram_by_day = get_by_day("ram")
-all_days = sorted(set(list(battery_by_day.keys()) + list(cpu_by_day.keys())))
+cpu_by_day     = get_by_day("cpu_load")
+ram_by_day     = get_by_day("ram")
+all_days       = sorted(set(list(battery_by_day.keys()) + list(cpu_by_day.keys())))
 
 for day in all_days:
-    dow = ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"][day.weekday()]
-    print(f"\n  📅 {day.strftime('%Y-%m-%d')} {dow}")
+    print(f"\n  📅 {day.strftime('%Y-%m-%d %A')}")
     if day in battery_by_day:
         levels = []
         charges = 0
-        prev_pct = None
+        prev = None
         for t, v in battery_by_day[day]:
             try:
                 pct = int(v.split('%')[0])
                 levels.append(pct)
-                if prev_pct is not None and pct > prev_pct + 15:
+                if prev is not None and pct > prev + 15:
                     charges += 1
-                prev_pct = pct
+                prev = pct
             except:
                 pass
         if levels:
@@ -135,35 +156,27 @@ for day in all_days:
             print(f"    🧠 RAM    : avg:{sum(used_list)//len(used_list)}MB max:{max(used_list)}MB")
     if day in battery_by_day:
         records = len(battery_by_day[day])
-        print(f"    📊 Записей: {records} (~{records//60}ч активности)")
+        print(f"    📊 Записей: {records} (~{records/60:.1f}ч активности)")
 
+# ── 4. АВТОВЫВОДЫ ────────────────────────────────────
 print("\n[ 4 ] АВТОМАТИЧЕСКИЕ ВЫВОДЫ")
 if battery_data:
     levels = []
-    low_count = 0
-    charges = 0
-    prev_pct = None
     for t, v in battery_data:
         try:
             pct = int(v.split('%')[0])
-            levels.append(pct)
-            if pct < 20:
-                low_count += 1
-            if prev_pct is not None and pct > prev_pct + 15:
-                charges += 1
-            prev_pct = pct
+            levels.append((t, pct))
         except:
             pass
     if levels:
-        avg = sum(levels) / len(levels)
-        print(f"  🔋 Средний заряд : {avg:.0f}%")
-        print(f"  🔌 Циклов зарядки: {charges}")
+        avg       = sum(x[1] for x in levels) / len(levels)
+        low_count = sum(1 for i, (_, p) in enumerate(levels) if p < 20 and (i == 0 or levels[i-1][1] >= 20))
+        if avg > 70:
+            print(f"  ✅ Хорошо следишь за зарядкой (средний {avg:.0f}%)")
+        else:
+            print(f"  ⚠️  Часто разряжаешь телефон (средний {avg:.0f}%)")
         if low_count > 5:
             print(f"  ⚠️  {low_count} раз заряд падал ниже 20%")
-        if avg > 70:
-            print(f"  ✅ Хорошо следишь за зарядкой")
-        else:
-            print(f"  ⚠️  Часто разряжаешь телефон")
 
 if cpu_data:
     loads = []
@@ -177,45 +190,88 @@ if cpu_data:
         avg_load = sum(loads) / len(loads)
         if avg_load > 15:
             print(f"  ⚠️  Постоянно высокая нагрузка CPU ({avg_load:.1f})")
-        else:
-            print(f"  ✅ Нормальная нагрузка CPU ({avg_load:.1f})")
 
 net_data = get_all("internet")
 if net_data:
     offline = sum(1 for _, v in net_data if 'offline' in v)
-    total_net = len(net_data)
-    pct = (total_net - offline) / total_net * 100 if total_net > 0 else 0
-    print(f"  🌐 Интернет стабильность: {pct:.0f}% (обрывов: {offline})")
+    online  = sum(1 for _, v in net_data if 'online' in v)
+    print(f"  🌐 Интернет стабильность: {online/(online+offline)*100:.0f}% (обрывов: {offline})")
 
 notes = get_all("note")
 if notes:
     print(f"  📝 Заметок сохранено: {len(notes)}")
-    for t, v in notes:
+    for t, v in notes[-3:]:
         print(f"    {t.strftime('%m-%d %H:%M')} — {v}")
-else:
-    print(f"  💡 Заметок нет — используй: note \"текст\"")
 
-print("\n[ 5 ] СТАТИСТИКА БАЗЫ")
+# ── 5. TELEGRAM ───────────────────────────────────────
+print("\n[ 5 ] TELEGRAM")
+
+tg_activity = get_last("tg_activity")
+if tg_activity and isinstance(tg_activity, dict):
+    my    = tg_activity.get('messages_my', 0)
+    their = tg_activity.get('messages_their', 0)
+    total = my + their
+    print(f"  ✉️  Твоих сообщений  : {my}")
+    print(f"  💬 От собеседников  : {their}")
+    print(f"  👥 Активных чатов   : {tg_activity.get('active_chats', 0)}")
+    if total > 0:
+        print(f"  ⚖️  Ты пишешь        : {my/total*100:.0f}%")
+
+tg_tone = get_last("tg_tone")
+if tg_tone and isinstance(tg_tone, dict):
+    pos = tg_tone.get('positive', 0)
+    neg = tg_tone.get('negative', 0)
+    neu = tg_tone.get('neutral', 0)
+    print(f"  😊 Тональность      : позитив:{pos} негатив:{neg} нейтрал:{neu}")
+    dominant = max(tg_tone, key=tg_tone.get)
+    emoji = "😊" if dominant=="positive" else "😟" if dominant=="negative" else "😐"
+    print(f"  {emoji} Преобладает     : {dominant}")
+
+tg_topics = get_last("tg_topics")
+if tg_topics and isinstance(tg_topics, dict):
+    sorted_t = sorted(tg_topics.items(), key=lambda x: x[1], reverse=True)[:5]
+    print(f"  📌 Топ темы         : {', '.join([f'{k}:{v}' for k,v in sorted_t])}")
+
+tg_words = get_last("tg_words_my")
+if tg_words and isinstance(tg_words, dict):
+    top = sorted(tg_words.items(), key=lambda x: x[1], reverse=True)[:10]
+    print(f"  🔤 Твои топ слова   : {', '.join([w for w,_ in top])}")
+
+tg_hours = get_last("tg_hours")
+if tg_hours and isinstance(tg_hours, dict):
+    top_h = sorted(tg_hours.items(), key=lambda x: x[1], reverse=True)[:5]
+    print(f"  🕐 Активен в TG     : {', '.join([f'{h}:00' for h,_ in top_h])}")
+
+tg_days = get_last("tg_days")
+if tg_days and isinstance(tg_days, dict):
+    top_d = sorted(tg_days.items(), key=lambda x: x[1], reverse=True)[:3]
+    print(f"  📅 Активные дни     : {', '.join([f'{d}({c})' for d,c in top_d])}")
+
+# ── 6. СТАТИСТИКА БАЗЫ ───────────────────────────────
+print("\n[ 6 ] СТАТИСТИКА БАЗЫ")
 total = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+size  = os.path.getsize("life_log_encrypted.db") / 1024
 types = conn.execute(
     "SELECT event_type, COUNT(*) FROM events GROUP BY event_type ORDER BY COUNT(*) DESC"
 ).fetchall()
-size = os.path.getsize("life_log_encrypted.db") / 1024
 first_ts = conn.execute("SELECT MIN(timestamp) FROM events").fetchone()[0]
-last_ts = conn.execute("SELECT MAX(timestamp) FROM events").fetchone()[0]
 
-print(f"  📊 Всего записей : {total}")
-print(f"  💾 Размер базы   : {size:.0f} КБ")
-if first_ts and last_ts:
-    t1 = datetime.datetime.strptime(first_ts[:19], '%Y-%m-%d %H:%M:%S')
-    t2 = datetime.datetime.strptime(last_ts[:19], '%Y-%m-%d %H:%M:%S')
-    hours = (t2 - t1).total_seconds() / 3600
-    print(f"  ⏱️  Период         : {hours:.1f} часов")
-    print(f"  📈 Записей/час    : {total/hours:.0f}")
+print(f"  📊 Всего записей  : {total}")
+print(f"  💾 Размер базы    : {size:.0f} КБ")
+
+if first_ts:
+    try:
+        t1    = datetime.datetime.strptime(first_ts[:19], '%Y-%m-%d %H:%M:%S')
+        hours = (datetime.datetime.now() - t1).total_seconds() / 3600
+        print(f"  ⏱️  Период          : {hours:.1f} часов")
+        print(f"  📈 Записей/час     : {total/hours:.0f}")
+    except:
+        pass
+
 print(f"  Типы данных:")
 for etype, cnt in types:
     bar = "▪" * min(cnt // 10, 30)
-    print(f"    {etype:<15} {cnt:>5}  {bar}")
+    print(f"    {etype:<20} {cnt:>5}  {bar}")
 
 print("\n================================================")
 conn.close()
